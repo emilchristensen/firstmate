@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# Behavior tests for fm-bridge.sh, the read-only triage-ordered fleet dashboard.
+# Drives the scriptable --once path against synthetic state fixtures and asserts
+# each task lands in the correct triage band. Classification is driven by real
+# snapshot signals (fm-fleet-snapshot.v1 + fm-classify-lib.sh), never hard-coded.
+set -u
+
+# shellcheck source=tests/lib.sh
+# shellcheck disable=SC1091
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+BRIDGE="$ROOT/bin/fm-bridge.sh"
+TMP_ROOT=$(fm_test_tmproot fm-bridge)
+
+command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
+
+# A fake tmux that reports every target as an existing pane, and a busy footer
+# only for targets matching FAKE_BUSY_RE (so a test can make exactly one crew
+# "working" via its pane and leave the rest idle). A fake no-mistakes with no
+# runs forces crew-state onto the pane / status-log path.
+make_fakebin() {  # <dir>
+  local fb
+  fb=$(fm_fakebin "$1")
+  cat > "$fb/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+  cat > "$fb/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+target=""; prev=""
+for arg in "$@"; do
+  [ "$prev" = "-t" ] && target=$arg
+  prev=$arg
+done
+case "${1:-}" in
+  display-message)
+    case "$*" in
+      *pane_current_command*) printf 'codex\n' ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
+  capture-pane)
+    if [ -n "${FAKE_BUSY_RE:-}" ] && printf '%s' "$target" | grep -qE "$FAKE_BUSY_RE"; then
+      printf 'validating change\nesc to interrupt\n'
+    else
+      printf 'all quiet\n> \n'
+    fi
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux"
+  printf '%s\n' "$fb"
+}
+
+make_home() {  # <name>
+  local home=$TMP_ROOT/$1
+  mkdir -p "$home/state" "$home/data" "$home/projects" "$home/config"
+  printf '%s\n' "$home"
+}
+
+# Print the entry lines of one triage band (exclusive of the header, up to the
+# next band header). Band headers render flush-left; entries are indented.
+band() {  # <output> <header>
+  awk -v h="$2" '
+    $0 == h { grab = 1; next }
+    grab && ($0 == "NEEDS YOU" || $0 == "RUNNING" || $0 == "WAITING / HELD" || $0 == "LANDED") { exit }
+    grab { print }
+  ' <<<"$1"
+}
+
+run_bridge() {  # <home> <fakebin> [busy-re]
+  NO_COLOR=1 FAKE_BUSY_RE="${3:-}" PATH="$2:$PATH" FM_HOME="$1" "$BRIDGE" --once
+}
+
+# --- Acceptance scenario ----------------------------------------------------
+# A running crew, a held backlog item, landed PRs, and nothing needing the captain.
+test_acceptance_bands() {
+  local home fakebin out run_band hold_band land_band needs_band
+  home=$(make_home acceptance)
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/atlassian-axi"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] atlas-axi-scout-x7 - investigate atlassian axi (repo: atlassian-axi) (kind: ship) (since 2026-07-07)
+- [ ] modular-sofas-6785-4w - fix sofa module (repo: modular-sofas) (kind: ship) (since 2026-07-07) (hold: waiting on vendor spec) (hold-kind: vendor)
+
+## Queued
+- [ ] follow-up-9z - later cleanup blocked-by: atlas-axi-scout-x7 - waits on atlas landing (repo: atlassian-axi) (kind: ship)
+
+## Done
+- [x] gitflow-bugfix-fix-3k - correct PR 1314 flow - https://github.com/dept/beno-bolia-website/pull/1314 (merged 2026-07-13)
+- [x] gitflow-test-rule-7q - document test-branch flow - https://github.com/dept/beno-bolia-website/pull/1314 (merged 2026-07-13)
+EOF
+
+  fm_write_meta "$home/state/atlas-axi-scout-x7.meta" \
+    "window=firstmate:fm-atlas-axi-scout-x7" \
+    "worktree=$home/projects/atlassian-axi" \
+    "project=$home/projects/atlassian-axi" \
+    "harness=codex" \
+    "kind=ship" \
+    "mode=ship" \
+    "yolo=off" \
+    "pr=https://github.com/emilchristensen/atlassian-axi/pull/1"
+  printf 'working: reproducing the issue\n' > "$home/state/atlas-axi-scout-x7.status"
+
+  out=$(run_bridge "$home" "$fakebin" 'atlas-axi-scout-x7')
+
+  run_band=$(band "$out" "RUNNING")
+  hold_band=$(band "$out" "WAITING / HELD")
+  land_band=$(band "$out" "LANDED")
+  needs_band=$(band "$out" "NEEDS YOU")
+
+  assert_contains "$run_band" "atlas-axi-scout-x7" "the busy crew must be under RUNNING"
+  assert_contains "$run_band" "[atlassian-axi]" "RUNNING must show the project"
+  assert_contains "$hold_band" "modular-sofas-6785-4w" "the held item must be under WAITING / HELD"
+  assert_contains "$hold_band" "held (vendor)" "WAITING must show the hold-kind"
+  assert_contains "$hold_band" "waiting on vendor spec" "WAITING must show the hold reason"
+  assert_contains "$hold_band" "follow-up-9z" "a blocked-by queued item belongs in WAITING / HELD"
+  assert_contains "$hold_band" "waits on atlas landing" "WAITING must show the blocked-by reason"
+  assert_contains "$land_band" "PR #1314" "the merged gitflow PRs must be under LANDED"
+  assert_contains "$needs_band" "nothing waiting on you" "NEEDS YOU must be empty in this scenario"
+
+  # Placement must be exclusive: no cross-band leakage. atlas may legitimately
+  # appear inside WAITING as another item's blocked-by reference, so assert it is
+  # not present as its OWN indented WAITING entry (a line whose subject is atlas).
+  assert_not_contains "$run_band" "modular-sofas-6785-4w" "a held item must not appear under RUNNING"
+  if printf '%s\n' "$hold_band" | grep -qE '^  atlas-axi-scout-x7 '; then
+    fail "a running crew must not appear as its own WAITING / HELD entry: $hold_band"
+  fi
+  assert_not_contains "$needs_band" "atlas-axi-scout-x7" "a working crew is not captain-actionable"
+
+  pass "acceptance scenario places running / held / landed correctly with NEEDS YOU empty"
+}
+
+# --- NEEDS YOU classification ----------------------------------------------
+# Prove the three captain-actionable signals surface, a resolved decision does
+# not (fm-classify-lib.sh keyed fold), and a live crew stays out of NEEDS YOU.
+test_needs_you_signals() {
+  local home fakebin out needs_band run_band
+  home=$(make_home needsyou)
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/app"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] decide-api-4a - pick api shape (repo: app) (kind: ship) (since 2026-07-10)
+- [ ] stuck-build-5b - unblock the build (repo: app) (kind: ship) (since 2026-07-10)
+- [ ] merge-ready-6c - land the feature (repo: app) (kind: ship) (since 2026-07-10)
+- [ ] resolved-7d - already decided (repo: app) (kind: ship) (since 2026-07-10)
+- [ ] run-live-8e - active work (repo: app) (kind: ship) (since 2026-07-10)
+
+## Done
+EOF
+
+  # An OPEN decision must be read from the status log, so the pane stays idle:
+  # a busy pane is treated by the snapshot as "the crew resumed past the gate"
+  # and would clear the open decision.
+  for id in decide-api-4a stuck-build-5b merge-ready-6c resolved-7d run-live-8e; do
+    fm_write_meta "$home/state/$id.meta" \
+      "window=firstmate:fm-$id" \
+      "worktree=$home/projects/app" \
+      "project=$home/projects/app" \
+      "harness=codex" "kind=ship" "mode=ship" "yolo=off"
+  done
+  printf 'pr=https://github.com/emilchristensen/app/pull/12\n' >> "$home/state/merge-ready-6c.meta"
+
+  printf 'needs-decision [key=api]: rest vs graphql\n' > "$home/state/decide-api-4a.status"
+  printf 'blocked: waiting on infra creds\n' > "$home/state/stuck-build-5b.status"
+  printf 'done: PR https://github.com/emilchristensen/app/pull/12 checks green\n' > "$home/state/merge-ready-6c.status"
+  printf 'needs-decision [key=fmt]: tabs vs spaces\nresolved [key=fmt]: spaces\n' > "$home/state/resolved-7d.status"
+  printf 'working: implementing\n' > "$home/state/run-live-8e.status"
+
+  out=$(run_bridge "$home" "$fakebin" 'run-live-8e')
+  needs_band=$(band "$out" "NEEDS YOU")
+  run_band=$(band "$out" "RUNNING")
+
+  assert_contains "$needs_band" "decide-api-4a" "an open needs-decision must surface in NEEDS YOU"
+  assert_contains "$needs_band" "decision needed" "NEEDS YOU must label the decision"
+  assert_contains "$needs_band" "stuck-build-5b" "an open blocked status must surface in NEEDS YOU"
+  assert_contains "$needs_band" "merge-ready-6c" "a checks-green PR awaiting merge must surface in NEEDS YOU"
+  assert_contains "$needs_band" "ready to merge" "NEEDS YOU must label the merge-ready PR"
+  assert_not_contains "$needs_band" "resolved-7d" "a resolved decision must not resurface in NEEDS YOU"
+  assert_not_contains "$needs_band" "run-live-8e" "a working crew is not captain-actionable"
+  assert_contains "$run_band" "run-live-8e" "the working crew belongs under RUNNING"
+
+  pass "NEEDS YOU surfaces open decisions, blocks, and merge-ready PRs but not resolved or working crew"
+}
+
+# --- Frame shape ------------------------------------------------------------
+test_frame_shape_and_empty_fleet() {
+  local home fakebin out
+  home=$(make_home emptyfleet)
+  fakebin=$(make_fakebin "$home")
+  out=$(run_bridge "$home" "$fakebin")
+
+  assert_contains "$out" "THE BRIDGE" "the header must render"
+  assert_contains "$out" "needs-you 0" "the header must count needs-you"
+  assert_contains "$out" "NEEDS YOU" "all four band labels must render"
+  assert_contains "$out" "RUNNING" "all four band labels must render"
+  assert_contains "$out" "WAITING / HELD" "all four band labels must render"
+  assert_contains "$out" "LANDED" "all four band labels must render"
+  assert_contains "$out" "[m]erge" "the footer hint must render"
+  assert_contains "$out" "no live crew" "an empty fleet must degrade gracefully"
+
+  pass "frame renders header, four bands, and footer on an empty fleet"
+}
+
+test_acceptance_bands
+test_needs_you_signals
+test_frame_shape_and_empty_fleet
