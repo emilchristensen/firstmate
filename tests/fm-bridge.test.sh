@@ -117,6 +117,10 @@ EOF
 
   assert_contains "$run_band" "atlas-axi-scout-x7" "the busy crew must be under RUNNING"
   assert_contains "$run_band" "[atlassian-axi]" "RUNNING must show the project"
+  # Elapsed must be a real duration (e.g. 0s, 4m, 1h3m), never a calendar-day word.
+  printf '%s\n' "$run_band" | grep -qE '[0-9]+[smhd]' \
+    || fail "RUNNING must show a real elapsed duration: $run_band"
+  assert_not_contains "$run_band" "today" "RUNNING elapsed must not be a calendar-day word"
   assert_contains "$hold_band" "modular-sofas-6785-4w" "the held item must be under WAITING / HELD"
   assert_contains "$hold_band" "held (vendor)" "WAITING must show the hold-kind"
   assert_contains "$hold_band" "waiting on vendor spec" "WAITING must show the hold reason"
@@ -212,6 +216,47 @@ test_frame_shape_and_empty_fleet() {
   pass "frame renders header, four bands, and footer on an empty fleet"
 }
 
+# --- LANDED column budgeting + report compaction ---------------------------
+# At a narrow width the title must absorb all truncation while the trailing PR /
+# date stays fully shown, and a report artifact renders as its bare basename.
+test_landed_budget_and_report_compaction() {
+  local home fakebin out land_band line
+  home=$(make_home landed)
+  fakebin=$(make_fakebin "$home")
+
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+
+## Queued
+
+## Done
+- [x] shipped-9a - a deliberately very long landed title that must be clipped hard - https://github.com/emilchristensen/app/pull/1314 (merged 2026-07-13)
+- [x] scouted-8b - another long scout report title that overflows the row easily - data/scouted-8b/report.md (reported 2026-07-13)
+EOF
+  mkdir -p "$home/data/scouted-8b"; printf '# r\n' > "$home/data/scouted-8b/report.md"
+
+  out=$(COLUMNS=50 run_bridge "$home" "$fakebin")
+  land_band=$(band "$out" "LANDED")
+
+  assert_contains "$land_band" "PR #1314" "LANDED must show the full PR number"
+  assert_contains "$land_band" "(2026-07-13)" "LANDED must show the full trailing date, never a hard cut"
+  assert_contains "$land_band" "report.md" "a report artifact must render as its compact basename"
+  assert_not_contains "$land_band" "data/scouted-8b" "the data/<id>/ prefix must be dropped"
+  assert_contains "$land_band" "…" "the title column must truncate with a clean ellipsis"
+
+  # Every landed entry that carries a date must carry the WHOLE date.
+  while IFS= read -r line; do
+    case "$line" in
+      *"2026-07-1"*) assert_contains "$line" "(2026-07-13)" "a landed date must never be partially cut: $line" ;;
+    esac
+  done <<<"$land_band"
+
+  pass "LANDED budgets columns so the trailing PR/date is intact and report paths compact"
+}
+
 test_acceptance_bands
 test_needs_you_signals
+test_landed_budget_and_report_compaction
 test_frame_shape_and_empty_fleet
