@@ -35,6 +35,9 @@ for arg in "$@"; do
 done
 case "${1:-}" in
   display-message)
+    # A target marked DEAD has no pane: fail like a gone tmux window so crew-state
+    # reads "unknown" (backend target gone), exercising the catch-all band.
+    case "$target" in *DEAD*) exit 1 ;; esac
     case "$*" in
       *pane_current_command*) printf 'codex\n' ;;
       *) printf '%%1\n' ;;
@@ -403,10 +406,46 @@ EOF
   pass "LANDED budgets columns so the trailing PR/date is intact and report paths compact"
 }
 
+# --- Catch-all: no live task vanishes ---------------------------------------
+# A live task whose crew-state is neither actionable, running, paused, awaiting a
+# PR, nor held must still appear (here: a dead-endpoint task reads "unknown") under
+# WAITING / HELD via the catch-all, never in NEEDS YOU.
+test_catchall_keeps_live_tasks_visible() {
+  local home fakebin out hold_band needs_band
+  home=$(make_home catchall)
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/app"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] stuck-crew-2u - a crew with a gone pane (repo: app) (kind: ship) (since 2026-07-10)
+
+## Done
+EOF
+  fm_write_meta "$home/state/stuck-crew-2u.meta" \
+    "window=fakeses:fm-stuck-crew-2u-DEAD" \
+    "worktree=$home/projects/app" \
+    "project=$home/projects/app" \
+    "harness=codex" "kind=ship" "mode=no-mistakes" "yolo=off"
+  # No status line: with a dead endpoint and no run, crew-state reports unknown.
+
+  out=$(run_bridge "$home" "$fakebin")
+  hold_band=$(band "$out" "WAITING / HELD")
+  needs_band=$(band "$out" "NEEDS YOU")
+
+  assert_contains "$hold_band" "stuck-crew-2u" "an unclassified live task must surface under WAITING / HELD via the catch-all"
+  assert_not_contains "$needs_band" "stuck-crew-2u" "an unknown crew is not captain-actionable"
+
+  pass "the catch-all keeps an otherwise-unclassified live task visible"
+}
+
 test_acceptance_bands
 test_needs_you_signals
 test_direct_pr_awaits_checks
 test_needs_you_done_no_pr_and_failed
 test_held_paused_single_row
 test_landed_budget_and_report_compaction
+test_catchall_keeps_live_tasks_visible
 test_frame_shape_and_empty_fleet

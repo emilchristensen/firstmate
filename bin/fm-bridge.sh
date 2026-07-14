@@ -16,14 +16,18 @@
 #                   detail marker, and no merged/closed detail), a failed crew,
 #                   a done scout whose report is ready to review, and a done
 #                   local-only ship awaiting the captain's local review.
-#   2. RUNNING    - live crewmates (endpoint present, crew-state working) not already
-#                   in NEEDS YOU and not on hold. Shows id, project, current step,
-#                   real elapsed since the task started, and target PR if any.
+#   2. RUNNING    - crewmates whose crew-state is working/running/fixing/ci (the
+#                   run-step is authoritative even if the pane/endpoint has closed),
+#                   not already in NEEDS YOU and not on hold. Shows id, project,
+#                   current step, real elapsed since the task started, and target PR.
 #   3. WAITING / HELD - backlog holds (hold-kind + reason), paused statuses, a
-#                   finished task whose PR is open but not yet checks-green, and
-#                   queued items blocked-by another task. Visible, not attention-grabbing.
-#   4. LANDED     - the most recent Done entries (default last 5) with PR # or a
-#                   compact report artifact.
+#                   finished task whose PR is open but not yet checks-green, queued
+#                   items blocked-by another task, and a catch-all so any other live
+#                   task (parked, unknown, done-without-PR) never vanishes. Visible,
+#                   not attention-grabbing.
+#   4. LANDED     - the most recent Done entries (default last 5), from this home's
+#                   backlog and the secondmate_landed roll-up, with PR # or a compact
+#                   report artifact.
 #
 # Layout is fitted to the terminal width in jq (columns passed per frame): every
 # line is clipped with a clean "…" and never hard-cut mid-word, and RUNNING /
@@ -222,8 +226,11 @@ build_frame() {  # <clock> <cols>
           _scoutready: $scoutready,
           _localready: $localready,
           _failed: $failed,
-          _running: ((.endpoint.exists == true)
-                     and ($st | IN("working","running","fixing","ci"))
+          _held: ((.backlog.held // false) == true),
+          # A working/running/fixing/ci crew is active per the fm-crew-state.sh
+          # run-step, which stays authoritative even when the pane/endpoint has
+          # closed, so endpoint presence is not required here.
+          _running: (($st | IN("working","running","fixing","ci"))
                      and ($needs | not)
                      and ((.backlog.held // false) | not)),
           _paused: (($st == "paused") and ($needs | not) and ((.backlog.held // false) | not)),
@@ -252,7 +259,12 @@ build_frame() {  # <clock> <cols>
       | "  \(.id)  [\(proj(.))]  " as $left
       | ("  \(elapsed(.id; .backlog.since))" + (if $n then "  PR #\($n)" else "" end)) as $right
       | ($cols - ($left | length) - ($right | length)) as $mid
-      | "R\t" + $left + fit(.current_state.detail; $mid) + $right
+      # Keep the trailing elapsed/PR always shown in full: while the fixed left
+      # part fits, clip only the step column; once left + right overflow the width,
+      # clip the left part instead so the trailing survives.
+      | (if $mid >= 0 then $left + fit(.current_state.detail; $mid) + $right
+         else fit($left; ([$cols - ($right | length), 1] | max)) + $right end) as $body
+      | "R\t" + $body
     ]) as $running_lines |
 
     # WAITING / HELD draws from backlog holds, paused tasks, and blocked-by queued
@@ -280,9 +292,22 @@ build_frame() {  # <clock> <cols>
       | "W\t  \(.id)  blocked-by \(.blocked_by)"
         + (if (.blocked_reason // "") != "" then " - \(.blocked_reason)" else "" end)
     ]) as $blocked_lines |
-    ($hold_lines + $paused_lines + $awaitingpr_lines + $blocked_lines) as $waiting_lines |
+    # Catch-all: any live task not already placed in NEEDS YOU, RUNNING, a paused
+    # or awaiting-PR row, or a backlog hold surfaces here so an in-flight task
+    # (parked, unknown, done-without-PR, and the like) never vanishes from the board.
+    ([$tasks[] | select((._needs or ._running or ._paused or ._awaitingpr or ._held) | not)
+      | "W\t  \(.id)  [\(proj(.))]  \(.current_state.state)"
+        + (if (.current_state.detail // "") != "" then ": \(.current_state.detail)" else "" end)
+    ]) as $catchall_lines |
+    ($hold_lines + $paused_lines + $awaitingpr_lines + $blocked_lines + $catchall_lines) as $waiting_lines |
 
-    ([.backlog.records[]? | select(.structured and .state == "done")]
+    # LANDED merges this home main-backlog Done records with the snapshot
+    # secondmate_landed roll-up (merges a secondmate managed, recorded in ITS own
+    # backlog), deduped by id and shown most-recent-first, so landed work is seen
+    # regardless of which home managed it.
+    (([.backlog.records[]? | select(.structured and .state == "done")]
+      + (.secondmate_landed.records // []))
+      | unique_by(.id)
       | sort_by(.completion.date // "") | reverse | .[0:$landed_n]
       | [ .[]
         | artifact_compact(.) as $art

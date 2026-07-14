@@ -234,7 +234,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
              kind:metadata($rest; "kind"),
              priority:metadata($rest; "priority"),
              held:((metadata($rest; "hold") != null) or (metadata($rest; "hold-kind") != null)),
-             hold_reason:metadata($rest; "hold"),
+             # hold reason is free prose in its own (hold: ...) paren group, so it
+             # may contain commas; capture up to the closing paren, not the generic
+             # comma-stopping metadata() (which would truncate at the first comma).
+             hold_reason:cap($rest; ".*(?:\\(|,[[:space:]]*)hold:[[:space:]]*(?<v>[^)]*)"),
              hold_kind:metadata($rest; "hold-kind"),
              hold_until:metadata($rest; "hold-until"),
              blocked_by:cap($rest; ".*blocked-by:[[:space:]]*(?<v>[^[:space:])]+).*"),
