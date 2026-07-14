@@ -427,8 +427,15 @@ test_watch_restart_reports_healthy_peer_without_attaching() {
   state="$dir/state"
   fakebin="$dir/fakebin"
   out="$dir/restart.out"
-  node -e 'process.on("SIGTERM", () => {}); setTimeout(() => {}, 300000)' &
+  # The peer must be TERM-resistant BEFORE the restart runs. Register the SIGTERM
+  # handler, then signal readiness by writing a marker; the test waits for it so a
+  # TERM cannot land in node's startup window and kill the peer (which would make
+  # restart find no healthy peer, start a fresh watcher, and hang to a timeout).
+  PEER_READY="$dir/peer.ready" node -e 'const { writeFileSync } = require("node:fs"); process.on("SIGTERM", () => {}); writeFileSync(process.env.PEER_READY, "ready\n"); setTimeout(() => {}, 300000)' &
   peer=$!
+  i=0
+  while [ ! -s "$dir/peer.ready" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$dir/peer.ready" ] || fail "peer did not register its SIGTERM handler in time"
   identity=$(FM_STATE_OVERRIDE="$state" bash -c '. "$1"; fm_pid_identity "$2"' _ "$LIB" "$peer") || fail "could not identify peer pid"
   mkdir "$state/.watch.lock"
   printf '%s\n' "$peer" > "$state/.watch.lock/pid"
