@@ -295,7 +295,11 @@ build_frame() {  # <clock> <cols>
     # Catch-all: any live task not already placed in NEEDS YOU, RUNNING, a paused
     # or awaiting-PR row, or a backlog hold surfaces here so an in-flight task
     # (parked, unknown, done-without-PR, and the like) never vanishes from the board.
-    ([$tasks[] | select((._needs or ._running or ._paused or ._awaitingpr or ._held) | not)
+    # kind=secondmate is excluded: an idle persistent secondmate reads state unknown
+    # by design (its busy-pane read is skipped), so it is a resting supervisor here,
+    # not a stuck task; a working or decision-gated secondmate still surfaces via the
+    # state-specific bands above.
+    ([$tasks[] | select(((._needs or ._running or ._paused or ._awaitingpr or ._held) | not) and (.kind != "secondmate"))
       | "W\t  \(.id)  [\(proj(.))]  \(.current_state.state)"
         + (if (.current_state.detail // "") != "" then ": \(.current_state.detail)" else "" end)
     ]) as $catchall_lines |

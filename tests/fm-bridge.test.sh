@@ -441,6 +441,42 @@ EOF
   pass "the catch-all keeps an otherwise-unclassified live task visible"
 }
 
+# --- Catch-all: idle secondmates excluded ------------------------------------
+# A kind=secondmate whose crew-state reads "unknown" is a healthy resting
+# supervisor (its busy-pane read is skipped by design), not a stuck task, so it
+# must not surface via the catch-all in any band.
+test_catchall_excludes_idle_secondmate() {
+  local home fakebin out hold_band needs_band
+  home=$(make_home catchall-sm)
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/app"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+
+## Done
+EOF
+  fm_write_meta "$home/state/sm-triage-7q.meta" \
+    "window=fakeses:fm-sm-triage-7q-DEAD" \
+    "worktree=$home/projects/app" \
+    "project=$home/projects/app" \
+    "harness=codex" "kind=secondmate" "mode=no-mistakes" "yolo=off" \
+    "home=$home/state/sm-home"
+  # No status line and a gone endpoint: crew-state reports unknown, which for a
+  # secondmate is the healthy idle resting state.
+
+  out=$(run_bridge "$home" "$fakebin")
+  hold_band=$(band "$out" "WAITING / HELD")
+  needs_band=$(band "$out" "NEEDS YOU")
+
+  assert_not_contains "$hold_band" "sm-triage-7q" "an idle secondmate must not render as a stuck task in the catch-all"
+  assert_not_contains "$needs_band" "sm-triage-7q" "an idle secondmate is not captain-actionable"
+
+  pass "the catch-all excludes a healthy idle secondmate"
+}
+
 test_acceptance_bands
 test_needs_you_signals
 test_direct_pr_awaits_checks
@@ -448,4 +484,5 @@ test_needs_you_done_no_pr_and_failed
 test_held_paused_single_row
 test_landed_budget_and_report_compaction
 test_catchall_keeps_live_tasks_visible
+test_catchall_excludes_idle_secondmate
 test_frame_shape_and_empty_fleet
