@@ -256,6 +256,7 @@ test_needs_you_done_no_pr_and_failed() {
 - [ ] scout-done-1b - investigate the flake (repo: app) (kind: scout) (since 2026-07-10)
 - [ ] local-done-2c - ship a local fix (repo: app) (kind: ship) (since 2026-07-10)
 - [ ] crashed-3d - broke mid-run (repo: app) (kind: ship) (since 2026-07-10)
+- [ ] scout-local-4e - scout on a local-only project (repo: app) (kind: scout) (since 2026-07-10)
 
 ## Done
 EOF
@@ -275,6 +276,11 @@ EOF
     "worktree=$home/projects/app" \
     "project=$home/projects/app" \
     "harness=codex" "kind=ship" "mode=ship" "yolo=off"
+  fm_write_meta "$home/state/scout-local-4e.meta" \
+    "window=firstmate:fm-scout-local-4e" \
+    "worktree=$home/projects/app" \
+    "project=$home/projects/app" \
+    "harness=codex" "kind=scout" "mode=local-only" "yolo=off"
 
   mkdir -p "$home/data/scout-done-1b"
   printf '# findings\n' > "$home/data/scout-done-1b/report.md"
@@ -282,6 +288,7 @@ EOF
   printf 'done: report at data/scout-done-1b/report.md\n' > "$home/state/scout-done-1b.status"
   printf 'done: ready in branch fm/local-done-2c\n' > "$home/state/local-done-2c.status"
   printf 'failed: build exploded\n' > "$home/state/crashed-3d.status"
+  printf 'done: findings summarized in chat\n' > "$home/state/scout-local-4e.status"
 
   out=$(run_bridge "$home" "$fakebin")
   needs_band=$(band "$out" "NEEDS YOU")
@@ -296,6 +303,7 @@ EOF
   assert_contains "$needs_band" "crashed-3d" "a failed crew must surface in NEEDS YOU"
   assert_contains "$needs_band" "failed - needs attention" "NEEDS YOU must label the failed crew"
   assert_not_contains "$run_band" "crashed-3d" "a failed crew must not appear under RUNNING"
+  assert_not_contains "$needs_band" "scout-local-4e" "a done local-only scout with no report must not render as local-ready"
 
   pass "NEEDS YOU surfaces done scouts, done local-only ships, and failed crews"
 }

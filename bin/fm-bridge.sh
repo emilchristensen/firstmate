@@ -214,7 +214,7 @@ build_frame() {  # <clock> <cols>
       | (($pr != null) and ($st == "done") and ($merged | not) and ($checksgreen | not)) as $prpending
       | (($pr == null) and ($st == "done") and (.kind == "scout")
          and ((.hints.scout_report_present == true) or (.paths.report.present == true))) as $scoutready
-      | (($pr == null) and ($st == "done") and (.mode == "local-only")) as $localready
+      | (($pr == null) and ($st == "done") and (.mode == "local-only") and (.kind != "scout")) as $localready
       | ($st == "failed") as $failed
       | (($pending or $blocked or $mergeready or $scoutready or $localready or $failed)) as $needs
       | . + {
@@ -339,8 +339,10 @@ fi
 # and redraws, while a redirected loop emits no escape sequences at all.
 TTY_OUT=0
 [ -t 1 ] && TTY_OUT=1
-cleanup() { [ "$TTY_OUT" = 1 ] && printf '\033[?25h'; }  # restore cursor on exit
-trap 'cleanup; exit 0' INT TERM
+CLEANED=0
+cleanup() { [ "$CLEANED" = 1 ] && return; CLEANED=1; [ "$TTY_OUT" = 1 ] && printf '\033[?25h'; }  # restore cursor once, on any exit
+trap 'cleanup' EXIT
+trap 'exit 0' INT TERM HUP
 [ "$TTY_OUT" = 1 ] && printf '\033[?25l'  # hide cursor during the loop
 while :; do
   frame=$(build_frame "$(date +%H:%M:%S)" "$(term_cols)")
