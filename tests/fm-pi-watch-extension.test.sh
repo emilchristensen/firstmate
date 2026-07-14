@@ -5,6 +5,10 @@ set -u
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
+# These tests import the .ts extension at runtime; enable type stripping on a node
+# that lacks native support (e.g. the gate runner's node 22.14).
+fm_enable_node_ts
+
 TMP_ROOT=$(fm_test_tmproot fm-pi-watch-extension)
 EXT="$ROOT/.pi/extensions/fm-primary-pi-watch.ts"
 

@@ -213,3 +213,27 @@ assert_absent() {
 assert_present() {
   [ -e "$1" ] || fail "$2"
 }
+
+# fm_enable_node_ts: enable runtime import of .ts modules on a node that does not
+# strip TypeScript types natively. Native, unflagged stripping arrived in node
+# 22.18 / 23.6 / 24; older node (e.g. the 22.14 the gate runner ships) throws
+# ERR_UNKNOWN_FILE_EXTENSION on `import("x.ts")`. A test that imports a TypeScript
+# extension at runtime calls this once after sourcing the library. It probes the
+# running node with a trivial .ts and, only when that node cannot import it,
+# appends --experimental-strip-types (to strip the types) plus
+# --disable-warning=ExperimentalWarning (so the one-off type-stripping warning
+# does not pollute output the test captures and asserts on) to NODE_OPTIONS, so
+# every later `node` call in the test inherits both. On a node that strips
+# natively (or with no node at all) this is a no-op, so it never double-adds the
+# flags or perturbs newer runtimes, which emit no such warning.
+fm_enable_node_ts() {
+  command -v node >/dev/null 2>&1 || return 0
+  case " ${NODE_OPTIONS:-} " in *" --experimental-strip-types "*) return 0 ;; esac
+  local probe
+  probe=$(mktemp -d) || return 0
+  printf 'export const ok = 1;\n' > "$probe/probe.ts"
+  if ! node --input-type=module -e "await import('file://$probe/probe.ts')" >/dev/null 2>&1; then
+    export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--experimental-strip-types --disable-warning=ExperimentalWarning"
+  fi
+  rm -rf "$probe"
+}

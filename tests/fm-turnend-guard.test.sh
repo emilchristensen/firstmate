@@ -16,6 +16,10 @@ set -u
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$ROOT/bin/fm-supervision-lib.sh"
 
+# The Pi guard subtests import the .ts guard extension at runtime; enable type
+# stripping on a node that lacks native support (e.g. the gate runner's node 22.14).
+fm_enable_node_ts
+
 TMP_ROOT=$(fm_test_tmproot fm-turnend-guard)
 fm_git_identity fmtest fmtest@example.invalid
 
