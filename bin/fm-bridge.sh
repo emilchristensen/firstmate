@@ -10,10 +10,12 @@
 # or block is never shown as still-open.
 #
 # Four triage bands, in this fixed order:
-#   1. NEEDS YOU  - captain-actionable only: open needs-decision, open blocked, and
+#   1. NEEDS YOU  - captain-actionable only: open needs-decision, open blocked,
 #                   a finished task whose PR is checks-green and awaiting a merge
 #                   (crew-state "done" with a PR, a checks-green/ready-for-review
-#                   detail marker, and no merged/closed detail).
+#                   detail marker, and no merged/closed detail), a failed crew,
+#                   a done scout whose report is ready to review, and a done
+#                   local-only ship awaiting the captain's local review.
 #   2. RUNNING    - live crewmates (endpoint present, crew-state working) not already
 #                   in NEEDS YOU and not on hold. Shows id, project, current step,
 #                   real elapsed since the task started, and target PR if any.
@@ -197,6 +199,10 @@ build_frame() {  # <clock> <cols>
       else "-" end;
 
     # --- classify tasks -----------------------------------------------------
+    # $merged / $checksgreen key off fm-crew-state.sh human-readable detail prose,
+    # verified against its current emit strings; a wording change there silently
+    # reroutes tasks between bands. The durable fix is a structured CI/merge-state
+    # field in the fm-fleet-snapshot.v1 contract (a v2 follow-up).
     ([.tasks[]
       | (.pr.url) as $pr
       | (.current_state.state) as $st
@@ -206,14 +212,21 @@ build_frame() {  # <clock> <cols>
       | (.hints.blocked_event) as $blocked
       | (($pr != null) and ($st == "done") and ($merged | not) and $checksgreen) as $mergeready
       | (($pr != null) and ($st == "done") and ($merged | not) and ($checksgreen | not)) as $prpending
-      | (($pending or $blocked or $mergeready)) as $needs
+      | (($pr == null) and ($st == "done") and (.kind == "scout")
+         and ((.hints.scout_report_present == true) or (.paths.report.present == true))) as $scoutready
+      | (($pr == null) and ($st == "done") and (.mode == "local-only")) as $localready
+      | ($st == "failed") as $failed
+      | (($pending or $blocked or $mergeready or $scoutready or $localready or $failed)) as $needs
       | . + {
           _needs: $needs,
+          _scoutready: $scoutready,
+          _localready: $localready,
+          _failed: $failed,
           _running: ((.endpoint.exists == true)
                      and ($st | IN("working","running","fixing","ci"))
                      and ($needs | not)
                      and ((.backlog.held // false) | not)),
-          _paused: (($st == "paused") and ($needs | not)),
+          _paused: (($st == "paused") and ($needs | not) and ((.backlog.held // false) | not)),
           _awaitingpr: ($prpending and ($needs | not) and ((.backlog.held // false) | not))
         }
     ]) as $tasks |
@@ -223,6 +236,12 @@ build_frame() {  # <clock> <cols>
     ([$tasks[] | select(._needs)
       | (if .hints.pending_decision then "decision needed"
          elif .hints.blocked_event then "blocked - needs help"
+         elif ._failed then
+           "failed - needs attention"
+           + (if (.current_state.detail // "") != "" then ": \(.current_state.detail)" else "" end)
+         elif ._scoutready then
+           "report ready - review findings  \(.paths.report.path // "" | sub(".*/"; ""))"
+         elif ._localready then "ready for your review (local branch)"
          else "PR checks green - ready to merge" end) as $why
       | (prnum(.pr.url)) as $n
       | "N\t  \(.id)  [\(proj(.))]  \($why)" + (if $n then "  PR #\($n)" else "" end)
@@ -243,6 +262,8 @@ build_frame() {  # <clock> <cols>
       | "W\t  \(.id)  held (\(.hold_kind // "hold")): \(.hold_reason // "-")"
         + (if (.hold_until // "") != "" then "  until \(.hold_until)" else "" end)
     ]) as $hold_lines |
+    # A paused task whose backlog record is also held already renders as a hold
+    # row above, so held ids are excluded here to avoid a double listing.
     ([$tasks[] | select(._paused and (._running | not))
       | "W\t  \(.id)  [\(proj(.))]  paused: \(.current_state.detail // "")"
     ]) as $paused_lines |
@@ -313,12 +334,17 @@ if [ "$ONCE" = 1 ]; then
   exit 0
 fi
 
-cleanup() { printf '\033[?25h'; }  # restore cursor on exit
+# Screen-control escapes (clear, cursor hide/restore) are gated on stdout being
+# a real TTY, independent of the color gate: a TTY with --no-color still clears
+# and redraws, while a redirected loop emits no escape sequences at all.
+TTY_OUT=0
+[ -t 1 ] && TTY_OUT=1
+cleanup() { [ "$TTY_OUT" = 1 ] && printf '\033[?25h'; }  # restore cursor on exit
 trap 'cleanup; exit 0' INT TERM
-[ "$USE_COLOR" = 1 ] && printf '\033[?25l'  # hide cursor during the loop
+[ "$TTY_OUT" = 1 ] && printf '\033[?25l'  # hide cursor during the loop
 while :; do
   frame=$(build_frame "$(date +%H:%M:%S)" "$(term_cols)")
-  printf '\033[H\033[2J'          # home + clear
+  [ "$TTY_OUT" = 1 ] && printf '\033[H\033[2J'          # home + clear
   printf '%s\n' "$frame" | render_frame
   sleep "$INTERVAL"
 done

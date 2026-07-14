@@ -239,6 +239,103 @@ EOF
   pass "a bare direct-PR done status awaits checks under WAITING, never merge-ready in NEEDS YOU"
 }
 
+# --- done-with-no-PR captain-actionable states + failed crews ----------------
+# A done scout with a report on disk, a done local-only ship with no PR, and a
+# failed crew are all captain-actionable and must surface in NEEDS YOU, driven
+# by real snapshot signals (kind, mode, scout_report_present, crew-state failed).
+test_needs_you_done_no_pr_and_failed() {
+  local home fakebin out needs_band run_band
+  home=$(make_home donenopr)
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/app"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] scout-done-1b - investigate the flake (repo: app) (kind: scout) (since 2026-07-10)
+- [ ] local-done-2c - ship a local fix (repo: app) (kind: ship) (since 2026-07-10)
+- [ ] crashed-3d - broke mid-run (repo: app) (kind: ship) (since 2026-07-10)
+
+## Done
+EOF
+
+  fm_write_meta "$home/state/scout-done-1b.meta" \
+    "window=firstmate:fm-scout-done-1b" \
+    "worktree=$home/projects/app" \
+    "project=$home/projects/app" \
+    "harness=codex" "kind=scout" "mode=ship" "yolo=off"
+  fm_write_meta "$home/state/local-done-2c.meta" \
+    "window=firstmate:fm-local-done-2c" \
+    "worktree=$home/projects/app" \
+    "project=$home/projects/app" \
+    "harness=codex" "kind=ship" "mode=local-only" "yolo=off"
+  fm_write_meta "$home/state/crashed-3d.meta" \
+    "window=firstmate:fm-crashed-3d" \
+    "worktree=$home/projects/app" \
+    "project=$home/projects/app" \
+    "harness=codex" "kind=ship" "mode=ship" "yolo=off"
+
+  mkdir -p "$home/data/scout-done-1b"
+  printf '# findings\n' > "$home/data/scout-done-1b/report.md"
+
+  printf 'done: report at data/scout-done-1b/report.md\n' > "$home/state/scout-done-1b.status"
+  printf 'done: ready in branch fm/local-done-2c\n' > "$home/state/local-done-2c.status"
+  printf 'failed: build exploded\n' > "$home/state/crashed-3d.status"
+
+  out=$(run_bridge "$home" "$fakebin")
+  needs_band=$(band "$out" "NEEDS YOU")
+  run_band=$(band "$out" "RUNNING")
+
+  assert_contains "$needs_band" "scout-done-1b" "a done scout with a report must surface in NEEDS YOU"
+  assert_contains "$needs_band" "report ready - review findings" "NEEDS YOU must label the scout report"
+  assert_contains "$needs_band" "report.md" "the scout row must show the report basename"
+  assert_not_contains "$needs_band" "data/scout-done-1b" "the data/<id>/ prefix must be dropped from the report name"
+  assert_contains "$needs_band" "local-done-2c" "a done local-only ship with no PR must surface in NEEDS YOU"
+  assert_contains "$needs_band" "ready for your review (local branch)" "NEEDS YOU must label the local-only review"
+  assert_contains "$needs_band" "crashed-3d" "a failed crew must surface in NEEDS YOU"
+  assert_contains "$needs_band" "failed - needs attention" "NEEDS YOU must label the failed crew"
+  assert_not_contains "$run_band" "crashed-3d" "a failed crew must not appear under RUNNING"
+
+  pass "NEEDS YOU surfaces done scouts, done local-only ships, and failed crews"
+}
+
+# --- held + paused renders one WAITING row -----------------------------------
+# A task that is both backlog-held and status-paused must render only the hold
+# row, never a second paused row for the same id.
+test_held_paused_single_row() {
+  local home fakebin out hold_band rows
+  home=$(make_home heldpaused)
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/app"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] hold-pause-1a - wait for vendor (repo: app) (kind: ship) (since 2026-07-10) (hold: vendor api down) (hold-kind: vendor)
+
+## Done
+EOF
+
+  fm_write_meta "$home/state/hold-pause-1a.meta" \
+    "window=firstmate:fm-hold-pause-1a" \
+    "worktree=$home/projects/app" \
+    "project=$home/projects/app" \
+    "harness=codex" "kind=ship" "mode=ship" "yolo=off"
+  printf 'paused: vendor api down, recheck tomorrow\n' > "$home/state/hold-pause-1a.status"
+
+  out=$(run_bridge "$home" "$fakebin")
+  hold_band=$(band "$out" "WAITING / HELD")
+
+  assert_contains "$hold_band" "hold-pause-1a" "the held+paused task must appear under WAITING / HELD"
+  assert_contains "$hold_band" "held (vendor)" "the surviving row must be the hold row"
+  rows=$(printf '%s\n' "$hold_band" | grep -c 'hold-pause-1a')
+  [ "$rows" = 1 ] || fail "a held+paused task must render exactly one WAITING row, got $rows: $hold_band"
+
+  pass "a held+paused task renders a single WAITING / HELD row"
+}
+
 # --- Frame shape ------------------------------------------------------------
 test_frame_shape_and_empty_fleet() {
   local home fakebin out
@@ -301,5 +398,7 @@ EOF
 test_acceptance_bands
 test_needs_you_signals
 test_direct_pr_awaits_checks
+test_needs_you_done_no_pr_and_failed
+test_held_paused_single_row
 test_landed_budget_and_report_compaction
 test_frame_shape_and_empty_fleet
