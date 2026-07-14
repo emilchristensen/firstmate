@@ -12,11 +12,13 @@
 # Four triage bands, in this fixed order:
 #   1. NEEDS YOU  - captain-actionable only: open needs-decision, open blocked, and
 #                   a finished task whose PR is checks-green and awaiting a merge
-#                   (crew-state "done" with a PR and no merged/closed detail).
+#                   (crew-state "done" with a PR, a checks-green/ready-for-review
+#                   detail marker, and no merged/closed detail).
 #   2. RUNNING    - live crewmates (endpoint present, crew-state working) not already
 #                   in NEEDS YOU and not on hold. Shows id, project, current step,
 #                   real elapsed since the task started, and target PR if any.
-#   3. WAITING / HELD - backlog holds (hold-kind + reason), paused statuses, and
+#   3. WAITING / HELD - backlog holds (hold-kind + reason), paused statuses, a
+#                   finished task whose PR is open but not yet checks-green, and
 #                   queued items blocked-by another task. Visible, not attention-grabbing.
 #   4. LANDED     - the most recent Done entries (default last 5) with PR # or a
 #                   compact report artifact.
@@ -199,9 +201,11 @@ build_frame() {  # <clock> <cols>
       | (.pr.url) as $pr
       | (.current_state.state) as $st
       | ((.current_state.detail // "") | test("merged|closed")) as $merged
+      | ((.current_state.detail // "") | test("checks green|ready for review|monitoring PR")) as $checksgreen
       | (.hints.pending_decision) as $pending
       | (.hints.blocked_event) as $blocked
-      | (($pr != null) and ($st == "done") and ($merged | not)) as $mergeready
+      | (($pr != null) and ($st == "done") and ($merged | not) and $checksgreen) as $mergeready
+      | (($pr != null) and ($st == "done") and ($merged | not) and ($checksgreen | not)) as $prpending
       | (($pending or $blocked or $mergeready)) as $needs
       | . + {
           _needs: $needs,
@@ -209,7 +213,8 @@ build_frame() {  # <clock> <cols>
                      and ($st | IN("working","running","fixing","ci"))
                      and ($needs | not)
                      and ((.backlog.held // false) | not)),
-          _paused: (($st == "paused") and ($needs | not))
+          _paused: (($st == "paused") and ($needs | not)),
+          _awaitingpr: ($prpending and ($needs | not) and ((.backlog.held // false) | not))
         }
     ]) as $tasks |
     ([$tasks[] | select(._needs) | .id]) as $needs_ids |
@@ -241,11 +246,20 @@ build_frame() {  # <clock> <cols>
     ([$tasks[] | select(._paused and (._running | not))
       | "W\t  \(.id)  [\(proj(.))]  paused: \(.current_state.detail // "")"
     ]) as $paused_lines |
+    # A finished task whose PR is open but not yet checks-green (e.g. a direct-PR
+    # crew reporting "done: PR <url>" the moment it opens the PR) is not yet
+    # captain-actionable: it waits on CI/review, so it surfaces here, not in
+    # NEEDS YOU, and is never lost.
+    ([$tasks[] | select(._awaitingpr)
+      | (prnum(.pr.url)) as $n
+      | "W\t  \(.id)  [\(proj(.))]  awaiting checks/review (PR open)"
+        + (if $n then "  PR #\($n)" else "" end)
+    ]) as $awaitingpr_lines |
     ([.backlog.records[]? | select(.structured and .state == "queued" and (.blocked_by // "") != "" and ((.held // false) | not))
       | "W\t  \(.id)  blocked-by \(.blocked_by)"
         + (if (.blocked_reason // "") != "" then " - \(.blocked_reason)" else "" end)
     ]) as $blocked_lines |
-    ($hold_lines + $paused_lines + $blocked_lines) as $waiting_lines |
+    ($hold_lines + $paused_lines + $awaitingpr_lines + $blocked_lines) as $waiting_lines |
 
     ([.backlog.records[]? | select(.structured and .state == "done")]
       | sort_by(.completion.date // "") | reverse | .[0:$landed_n]

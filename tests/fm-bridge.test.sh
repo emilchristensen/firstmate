@@ -197,6 +197,48 @@ EOF
   pass "NEEDS YOU surfaces open decisions, blocks, and merge-ready PRs but not resolved or working crew"
 }
 
+# --- direct-PR "done: PR <url>" awaits checks, is not merge-ready ------------
+# A direct-PR crew reports "done: PR <url>" the moment it opens the PR, before CI
+# runs, so a bare done-with-PR status carries no checks-green marker. It must not
+# be labeled merge-ready in NEEDS YOU (that would push a premature merge onto the
+# captain), and it must still be visible under WAITING / HELD awaiting checks.
+test_direct_pr_awaits_checks() {
+  local home fakebin out needs_band hold_band
+  home=$(make_home directpr)
+  fakebin=$(make_fakebin "$home")
+  mkdir -p "$home/projects/app"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+# Backlog
+
+## In flight
+- [ ] pr-open-3f - opened a PR, checks pending (repo: app) (kind: ship) (since 2026-07-10)
+
+## Done
+EOF
+
+  fm_write_meta "$home/state/pr-open-3f.meta" \
+    "window=firstmate:fm-pr-open-3f" \
+    "worktree=$home/projects/app" \
+    "project=$home/projects/app" \
+    "harness=codex" "kind=ship" "mode=direct-PR" "yolo=off"
+  printf 'pr=https://github.com/emilchristensen/app/pull/42\n' >> "$home/state/pr-open-3f.meta"
+
+  # A bare direct-PR done status with NO checks-green / ready-for-review wording,
+  # against an idle pane so crew-state reads the status log verbatim.
+  printf 'done: PR https://github.com/emilchristensen/app/pull/42\n' > "$home/state/pr-open-3f.status"
+
+  out=$(run_bridge "$home" "$fakebin")
+  needs_band=$(band "$out" "NEEDS YOU")
+  hold_band=$(band "$out" "WAITING / HELD")
+
+  assert_not_contains "$needs_band" "pr-open-3f" "a bare done-with-open-PR status must not surface as merge-ready in NEEDS YOU"
+  assert_contains "$hold_band" "pr-open-3f" "a done-with-open-PR task must remain visible under WAITING / HELD"
+  assert_contains "$hold_band" "awaiting checks/review" "WAITING must label the PR-open task as awaiting checks/review"
+
+  pass "a bare direct-PR done status awaits checks under WAITING, never merge-ready in NEEDS YOU"
+}
+
 # --- Frame shape ------------------------------------------------------------
 test_frame_shape_and_empty_fleet() {
   local home fakebin out
@@ -258,5 +300,6 @@ EOF
 
 test_acceptance_bands
 test_needs_you_signals
+test_direct_pr_awaits_checks
 test_landed_budget_and_report_compaction
 test_frame_shape_and_empty_fleet
