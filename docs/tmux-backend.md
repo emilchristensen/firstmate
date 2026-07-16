@@ -111,6 +111,48 @@ The classifier deliberately reports `unknown` for `node`/`python`/`python3` rath
 Practical effect: a dead `pi` secondmate is not auto-healed by the liveness sweep today; it is reported as `skipped: liveness probe inconclusive` instead, which still surfaces it for a human to act on.
 Resolving this would need either a `pi`-specific env marker inspectable from outside the process (mirroring `PI_CODING_AGENT=true`, which `bin/fm-harness.sh` already uses for self-detection but which is not readable from a different process without deeper introspection) or accepting the argument-inspection fragility - not attempted here.
 
+## Claude busy signatures
+
+Busy detection (is the pane's harness mid-turn?) is separate from the agent-liveness probe above: it reads the rendered pane text for a busy footer, not the foreground process name.
+The busy signature is owned by `FM_TMUX_BUSY_REGEX_DEFAULT` in `bin/fm-tmux-lib.sh`, mirrored byte-for-byte by `BUSY_REGEX` in `bin/fm-watch.sh` (which stays dependency-light and does not source the lib), and consumed by `bin/fm-crew-state.sh` and `bin/fm-supervise-daemon.sh`.
+
+The original signature keyed only on `esc to interrupt` (plus opencode's `esc interrupt`, pi's `Working...`, grok's `Ctrl+c:cancel`).
+Claude renders NO `esc to interrupt` while a Bash tool (shell) command runs - a multi-minute `docker`/`next build`, for example.
+Verified live 2026-07-16 against a real Claude crew (claude 2.1.211) mid `docker` build: crew-state reported `unknown · source: none` for a healthy, actively-working crew, so `bin/fm-bridge.sh` misplaced it out of RUNNING and the watcher's provably-working check (`bin/fm-classify-lib.sh` `crew_absorb_class`) could not confirm it.
+
+During a shell-tool run the footer and spinner look like this (captured `tmux capture-pane`, last non-blank lines, top-down):
+
+```
+  Running 1 shell command
+  $ DOCKER=/usr/local/bin/docker; "$DOCKER" build -t bolia-oom-repro .
+     ... build output ...
+✽ Flambeing... (1m 20s · ↓ 2.4k tokens · still thinking with high effort)
+  ⎿  Tip: Continue your session in Claude Code Desktop with /desktop
+────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────
+  [CAVEMAN]
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+```
+
+An idle, freshly-finished pane instead shows a static, past-tense summary with no token readout, and must stay not-busy:
+
+```
+✻ Brewed for 37m 45s
+```
+
+Two fixes, both empirically necessary (a widened regex alone still failed because the live spinner was above the scan window):
+
+- Two more Claude signals added to the signature: the running-shell footer `Running <N> shell command`, and the spinner's live token-flow readout `<N>k tokens`.
+  Both are present only while working; the idle `Brewed for` summary has neither, so it stays not-busy.
+  All alternatives are ASCII - the multibyte spinner glyph, `…`, `·`, and `↓`/`↑` are deliberately not matched, to avoid the locale fragility documented for grok's braille spinner and `bin/fm-composer-lib.sh`'s ghost stripper.
+  The `k`-suffix requirement on the token readout keeps it from matching bare `<N> tokens` prose in a transcript.
+- The busy scan reads the last 8 non-blank lines, not 6.
+  An intermittent `Tip:` line and the tool block push the spinner ~7 non-blank lines above the composer, out of a 6-line window; 8 catches it while keeping the bordered idle composer's `Brewed for` summary correctly not-busy.
+
+A busy pane is read before the status-log fallback in `bin/fm-crew-state.sh`, so a crew that declared `paused:` but has re-engaged on raw shell work reports `working`, not `paused` - the fix restores that override for the shell-command case too.
+Regression tests live in `tests/fm-crew-state.test.sh` (`test_no_run_claude_shell_command_pane_working`, `test_no_run_claude_idle_brewed_pane_not_busy`, `test_busy_shell_pane_overrides_stale_paused_log`).
+
 ## Limitations
 
 None specific to tmux for the reference path itself - it is the fully verified reference backend, while Orca and cmux are the backends without secondmate support.

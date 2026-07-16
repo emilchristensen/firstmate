@@ -49,7 +49,17 @@
 # Busy footers per harness (mirror fm-watch.sh). claude/codex: "esc to
 # interrupt"; opencode: "esc interrupt"; pi: "Working..."; grok: "Ctrl+c:cancel"
 # (grok's mid-turn cancel hint, shown iff a turn is running - verified grok 0.2.73).
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'
+# claude also renders NO "esc to interrupt" while a Bash tool (shell) command
+# runs: the footer shows "Running <N> shell command…" and the animated spinner
+# line "<gerund>… (<elapsed> · <arrow> <N>k tokens)" instead (verified live claude
+# 2026-07-16 mid docker/next build - docs/tmux-backend.md "Claude busy signatures").
+# So two more claude signals are recognized: the running-shell footer, and the
+# spinner's live "<N>k tokens" flow readout (present only while working; an idle
+# finished pane shows a static "Brewed for <total>" with no token readout, so it
+# stays not-busy). All alternatives stay ASCII to avoid the locale fragility of
+# matching claude's multibyte spinner glyph / ellipsis / middot directly (same
+# rationale as grok's braille spinner and bin/fm-composer-lib.sh's ghost stripper).
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|Running [0-9]+ shell command|[0-9]+(\.[0-9]+)?k tokens'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised
@@ -125,11 +135,17 @@ fm_pane_input_pending() {  # <target>
 }
 
 # fm_pane_is_busy: 0 if the pane's last few non-blank lines show a busy footer
-# (an agent mid-turn). Scans a 40-line tail like fm-watch.sh.
+# (an agent mid-turn). Scans a 40-line tail like fm-watch.sh. The busy footer is
+# matched over the last 8 non-blank lines (not 6): while a claude Bash tool runs,
+# an intermittent "Tip: …" line and the tool block push the live spinner up to
+# ~7 lines above the composer, out of a 6-line window (verified live 2026-07-16).
+# 8 keeps a bordered idle composer's "Brewed for <total>" summary correctly
+# not-busy while catching the working spinner. Mirrored by fm-watch.sh,
+# fm-crew-state.sh, and fm-supervise-daemon.sh (same busy-scan pipeline).
 fm_pane_is_busy() {  # <target>
   local win=$1 tail40
   tail40=$(tmux capture-pane -p -t "$win" -S -40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -8 \
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 

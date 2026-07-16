@@ -107,7 +107,13 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # grok: "Ctrl+c:cancel" (the mid-turn cancel hint in grok's keybind bar, shown iff a
 # turn is running; absent when idle - verified grok 0.2.73, ASCII to avoid the
 # locale fragility of matching grok's braille spinner glyph directly).
-BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel'}
+# claude also shows NO "esc to interrupt" while a Bash tool (shell) command runs -
+# "Running <N> shell command…" plus the spinner's "<N>k tokens" flow readout appear
+# instead - so both are recognized (verified live claude 2026-07-16). This default
+# MIRRORS FM_TMUX_BUSY_REGEX_DEFAULT in bin/fm-tmux-lib.sh, which owns the full
+# rationale; keep the two byte-identical. fm-watch.sh stays dependency-light and does
+# not source fm-tmux-lib.sh, hence the deliberate second copy CONTRIBUTING.md names.
+BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|Running [0-9]+ shell command|[0-9]+(\.[0-9]+)?k tokens'}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash
@@ -186,7 +192,9 @@ window_is_busy() {  # <window> <tail40>
     busy) return 0 ;;
     idle) return 1 ;;
     *)
-      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 | grep -qiE "$BUSY_REGEX"
+      # last-8 (not -6): the claude shell-tool spinner sits up to ~7 lines above the
+      # composer; see fm-tmux-lib.sh fm_pane_is_busy for the full rationale.
+      printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -8 | grep -qiE "$BUSY_REGEX"
       ;;
   esac
 }

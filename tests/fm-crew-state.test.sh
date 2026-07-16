@@ -85,7 +85,10 @@ case "${1:-}" in
     printf '%%1\n' ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
+    # FM_FAKE_PANE, when set, is served verbatim - used to feed real captured
+    # claude pane layouts (busy shell-tool spinner, idle "Brewed for" summary).
+    if [ -n "${FM_FAKE_PANE:-}" ]; then printf '%s\n' "$FM_FAKE_PANE"
+    elif [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\nesc to interrupt\n'
     else printf 'all quiet\n> \n'; fi ;;
 esac
 exit 0
@@ -154,13 +157,51 @@ reset_fakes() {
   FM_FAKE_AXI_STATUS_RUN=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
+  FM_FAKE_PANE=""
   FM_FAKE_TMUX_MISSING=0
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_TMUX_MISSING
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_PANE FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+}
+
+# Real captured claude pane layouts (verified live 2026-07-16, see
+# docs/tmux-backend.md "Claude busy signatures"), rendered ASCII-faithful with the
+# exact matched tokens and line STRUCTURE preserved. While a Bash tool command
+# runs, claude shows NO "esc to interrupt": the running-shell footer and the
+# animated spinner's "<N>k tokens" flow readout are the busy signals, and an
+# intermittent "Tip:" line pushes the spinner ~7 non-blank lines above the
+# composer - out of a 6-line window, which is why the busy scan reads the last 8.
+claude_busy_shell_pane() {
+  cat <<'EOF'
+  Running 1 shell command
+  $ DOCKER=/usr/local/bin/docker; "$DOCKER" build -t repro .
+     compiling ... this takes a while
+* Flambeing... (1m 20s . 2.4k tokens . still thinking with high effort)
+  Tip: Continue your session in Claude Code Desktop with /desktop
+--------------------------------------------------------------------------------
+>
+--------------------------------------------------------------------------------
+  [CAVEMAN]
+  bypass permissions on (shift+tab to cycle) . for agents
+EOF
+}
+# Idle finished pane: static past-tense "Brewed for <total>", NO token readout.
+# Includes a prose line mentioning a bare "4096 tokens" (no k) to pin that the
+# busy signature requires the "<N>k tokens" spinner form and never matches prose.
+claude_idle_brewed_pane() {
+  cat <<'EOF'
+  Recommend (1) + (4). (1) needs a product/arch decision on which routes can be
+  ISR - not something I should push autonomously. The run used 4096 tokens total.
+* Brewed for 37m 45s
+--------------------------------------------------------------------------------
+>
+--------------------------------------------------------------------------------
+  [CAVEMAN]
+  bypass permissions on (shift+tab to cycle) . for agents
+EOF
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -785,6 +826,68 @@ test_no_run_busy_pane() {
   pass "no run + busy pane reads working from the pane"
 }
 
+# (f2) no run + a claude pane running a Bash tool (shell) command -> working.
+# Regression for the fm-bridge busy-signature bug (2026-07-16): claude renders NO
+# "esc to interrupt" while a shell command runs, and the live spinner sits ~7
+# non-blank lines above the composer, so the old regex + 6-line window read this
+# actively-working crew as unknown/not-busy. The busy signature now recognizes the
+# running-shell footer and the "<N>k tokens" spinner readout over the last 8 lines.
+test_no_run_claude_shell_command_pane_working() {
+  reset_fakes
+  local d; d=$(new_case claude-shell-busy)
+  make_repo_on_branch "$d/wt" fm/feat-shell
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-shell.meta" "window=fm:fm-feat-shell" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_PANE=$(claude_busy_shell_pane)
+  local out; out=$(run_crew_state "$d" feat-shell)
+  assert_contains "$out" "state: working" "claude shell-command pane -> working"
+  assert_contains "$out" "source: pane" "claude shell-command pane -> pane source"
+  pass "no run + claude running a shell command reads working from the pane"
+}
+
+# (f3) no run + an idle, freshly-finished claude pane ("Brewed for <total>") must
+# NOT read as busy: it falls through to the status log. Pins that the widened
+# busy signature does not over-match a static idle summary or bare-"tokens" prose.
+test_no_run_claude_idle_brewed_pane_not_busy() {
+  reset_fakes
+  local d; d=$(new_case claude-idle-brewed)
+  make_repo_on_branch "$d/wt" fm/feat-brewed
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-brewed.meta" "window=fm:fm-feat-brewed" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: which database?\n' > "$d/state/feat-brewed.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_PANE=$(claude_idle_brewed_pane)
+  local out; out=$(run_crew_state "$d" feat-brewed)
+  assert_not_contains "$out" "source: pane" "idle 'Brewed for' pane must not read as busy from the pane"
+  assert_contains "$out" "state: parked" "idle pane -> falls to the status-log verb"
+  assert_contains "$out" "source: status-log" "idle 'Brewed for' pane -> status-log source"
+  pass "no run + idle 'Brewed for' pane stays not-busy (no false positive)"
+}
+
+# (f4) a provably-working (busy) claude pane overrides a STALE prior paused: log
+# line: fm-crew-state.sh checks the busy pane before the status-log fallback, so a
+# crew that declared a pause but has re-engaged on raw shell work reports working,
+# not paused. This is what lets crew_absorb_class (fm-classify-lib.sh) treat it as
+# provably working instead of an expected idle pause.
+test_busy_shell_pane_overrides_stale_paused_log() {
+  reset_fakes
+  local d; d=$(new_case claude-busy-overrides-paused)
+  make_repo_on_branch "$d/wt" fm/feat-repaused
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-repaused.meta" "window=fm:fm-feat-repaused" "worktree=$d/wt" "kind=ship"
+  printf 'paused: waiting on the upstream release\n' > "$d/state/feat-repaused.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_PANE=$(claude_busy_shell_pane)
+  local out; out=$(run_crew_state "$d" feat-repaused)
+  assert_contains "$out" "state: working" "busy pane overrides stale paused: -> working"
+  assert_contains "$out" "source: pane" "busy pane overrides stale paused: -> pane source"
+  pass "a busy shell pane overrides a stale paused: status line"
+}
+
 test_no_run_herdr_unknown_uses_backend_capture() {
   command -v jq >/dev/null 2>&1 || { pass "herdr pane fallback skipped without jq"; return; }
   reset_fakes
@@ -1160,6 +1263,9 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_claude_shell_command_pane_working
+test_no_run_claude_idle_brewed_pane_not_busy
+test_busy_shell_pane_overrides_stale_paused_log
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
 test_no_run_herdr_idle_agent_status_and_idle_pane_stays_idle

@@ -175,7 +175,9 @@ crew_pane_is_busy() {  # <target>
         busy) return 0 ;;
         *)
           tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || return 1
-          printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+          # last-8 mirrors fm-tmux-lib.sh fm_pane_is_busy (which owns the rationale):
+          # the claude shell-tool spinner sits up to ~7 lines above the composer.
+          printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -8 \
             | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
           ;;
       esac
