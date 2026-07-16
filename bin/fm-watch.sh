@@ -109,11 +109,15 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 # locale fragility of matching grok's braille spinner glyph directly).
 # claude also shows NO "esc to interrupt" while a Bash tool (shell) command runs -
 # "Running <N> shell command…" plus the spinner's "<N>k tokens" flow readout appear
-# instead - so both are recognized (verified live claude 2026-07-16). This default
-# MIRRORS FM_TMUX_BUSY_REGEX_DEFAULT in bin/fm-tmux-lib.sh, which owns the full
-# rationale; keep the two byte-identical. fm-watch.sh stays dependency-light and does
-# not source fm-tmux-lib.sh, hence the deliberate second copy CONTRIBUTING.md names.
-BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|Running [0-9]+ shell command|[0-9]+(\.[0-9]+)?k tokens'}
+# instead - so both are recognized (verified live claude 2026-07-16). The token
+# signal is anchored to the live-spinner co-structure - an open-paren elapsed timer
+# "(<Xm >Ys" immediately followed on the same line by "<N>k tokens" - which only the
+# animated spinner renders, so static idle-pane prose mentioning a kilo token count
+# never false-matches. This default MIRRORS FM_TMUX_BUSY_REGEX_DEFAULT in
+# bin/fm-tmux-lib.sh, which owns the full rationale; keep the two byte-identical.
+# fm-watch.sh stays dependency-light and does not source fm-tmux-lib.sh, hence the
+# deliberate second copy CONTRIBUTING.md names.
+BUSY_REGEX=${FM_BUSY_REGEX:-'esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|Running [0-9]+ shell command|\(([0-9]+m )?[0-9]+s [^)]*[0-9]+(\.[0-9]+)?k tokens'}
 # Always-on wake triage: most wakes during a long crew validation are benign (a
 # working: note or turn-end while a pipeline runs, a no-change heartbeat). Rather
 # than wake firstmate's LLM for each, this watcher classifies every wake in bash

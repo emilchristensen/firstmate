@@ -146,7 +146,9 @@ Two fixes, both empirically necessary (a widened regex alone still failed becaus
 - Two more Claude signals added to the signature: the running-shell footer `Running <N> shell command`, and the spinner's live token-flow readout `<N>k tokens`.
   Both are present only while working; the idle `Brewed for` summary has neither, so it stays not-busy.
   All alternatives are ASCII - the multibyte spinner glyph, `…`, `·`, and `↓`/`↑` are deliberately not matched, to avoid the locale fragility documented for grok's braille spinner and `bin/fm-composer-lib.sh`'s ghost stripper.
-  The `k`-suffix requirement on the token readout keeps it from matching bare `<N> tokens` prose in a transcript.
+  The token signal is spinner-anchored: the pattern requires an open-paren elapsed timer `(<Xm >Ys` followed on the same line by `<N>k tokens`, the co-structure only the animated spinner renders.
+  Static idle-pane prose that merely mentions a kilo token count - e.g. a final assistant message reading `... consumed 22.1k tokens before finishing.`, even `30s ... 22.1k tokens` - lacks the `(`+digit elapsed anchor, so it never false-matches.
+  This matters because that failure direction is the dangerous one: a stopped crew whose last message mentions a kilo token count reading busy would be absorbed by the provably-working check forever and never escalate, starving firstmate of supervision.
 - The busy scan reads the last 8 non-blank lines, not 6.
   An intermittent `Tip:` line and the tool block push the spinner ~7 non-blank lines above the composer, out of a 6-line window; 8 catches it while keeping the bordered idle composer's `Brewed for` summary correctly not-busy.
 

@@ -54,12 +54,17 @@
 # line "<gerund>… (<elapsed> · <arrow> <N>k tokens)" instead (verified live claude
 # 2026-07-16 mid docker/next build - docs/tmux-backend.md "Claude busy signatures").
 # So two more claude signals are recognized: the running-shell footer, and the
-# spinner's live "<N>k tokens" flow readout (present only while working; an idle
-# finished pane shows a static "Brewed for <total>" with no token readout, so it
-# stays not-busy). All alternatives stay ASCII to avoid the locale fragility of
-# matching claude's multibyte spinner glyph / ellipsis / middot directly (same
-# rationale as grok's braille spinner and bin/fm-composer-lib.sh's ghost stripper).
-FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|Running [0-9]+ shell command|[0-9]+(\.[0-9]+)?k tokens'
+# spinner's live "<N>k tokens" flow readout. The token signal is anchored to the
+# live-spinner co-structure - an open-paren elapsed timer "(<Xm >Ys" immediately
+# followed on the same line by "<N>k tokens" - which only the animated spinner
+# renders. Static idle-pane prose that merely mentions e.g. "22.1k tokens" (even
+# "30s ... 22.1k tokens") lacks the "("+digit elapsed anchor, so it never
+# false-matches; an idle finished pane shows a static "Brewed for <total>" with no
+# spinner timer, so it stays not-busy. All alternatives stay ASCII to avoid the
+# locale fragility of matching claude's multibyte spinner glyph / ellipsis / middot
+# directly (same rationale as grok's braille spinner and bin/fm-composer-lib.sh's
+# ghost stripper).
+FM_TMUX_BUSY_REGEX_DEFAULT='esc (to )?interrupt|Working\.\.\.|Ctrl\+c:cancel|Running [0-9]+ shell command|\(([0-9]+m )?[0-9]+s [^)]*[0-9]+(\.[0-9]+)?k tokens'
 
 # fm_tmux_strip_ghost: thin adapter over the shared, fleet-wide ghost extractor
 # fm_composer_strip_ghost (bin/fm-composer-lib.sh). It drops de-emphasised

@@ -203,6 +203,23 @@ claude_idle_brewed_pane() {
   bypass permissions on (shift+tab to cycle) . for agents
 EOF
 }
+# Idle finished pane whose final assistant message mentions a kilo token count in
+# prose ("22.1k tokens"), within the last 8 non-blank lines above the composer.
+# The token signal is spinner-anchored (open-paren elapsed timer + "<N>k tokens"
+# on one line), which this static prose lacks, so it must stay NOT busy - the
+# failure direction that would otherwise starve firstmate of escalation.
+claude_idle_tokens_prose_pane() {
+  cat <<'EOF'
+  Summarized the run: it consumed 22.1k tokens before finishing. Left the branch
+  ready for review; nothing more to push here.
+* Brewed for 41m 02s
+--------------------------------------------------------------------------------
+>
+--------------------------------------------------------------------------------
+  [CAVEMAN]
+  bypass permissions on (shift+tab to cycle) . for agents
+EOF
+}
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
 
@@ -867,6 +884,29 @@ test_no_run_claude_idle_brewed_pane_not_busy() {
   pass "no run + idle 'Brewed for' pane stays not-busy (no false positive)"
 }
 
+# (f3b) no run + an idle claude pane whose final message mentions a kilo token
+# count in PROSE ("22.1k tokens") must NOT read as busy. The token signal is
+# spinner-anchored (open-paren elapsed timer + "<N>k tokens" on one line), which
+# static prose lacks, so this falls through to the status log. Guards the
+# dangerous failure direction: a stopped crew reading busy forever would starve
+# firstmate of escalation.
+test_no_run_claude_idle_tokens_prose_pane_not_busy() {
+  reset_fakes
+  local d; d=$(new_case claude-idle-tokens-prose)
+  make_repo_on_branch "$d/wt" fm/feat-prose
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-prose.meta" "window=fm:fm-feat-prose" "worktree=$d/wt" "kind=ship"
+  printf 'needs-decision: which database?\n' > "$d/state/feat-prose.status"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_PANE=$(claude_idle_tokens_prose_pane)
+  local out; out=$(run_crew_state "$d" feat-prose)
+  assert_not_contains "$out" "source: pane" "idle kilo-token prose pane must not read as busy from the pane"
+  assert_contains "$out" "state: parked" "idle kilo-token prose pane -> falls to the status-log verb"
+  assert_contains "$out" "source: status-log" "idle kilo-token prose pane -> status-log source"
+  pass "no run + idle kilo-token prose pane stays not-busy (no false positive)"
+}
+
 # (f4) a provably-working (busy) claude pane overrides a STALE prior paused: log
 # line: fm-crew-state.sh checks the busy pane before the status-log fallback, so a
 # crew that declared a pause but has re-engaged on raw shell work reports working,
@@ -1265,6 +1305,7 @@ test_other_branch_run_ignored
 test_no_run_busy_pane
 test_no_run_claude_shell_command_pane_working
 test_no_run_claude_idle_brewed_pane_not_busy
+test_no_run_claude_idle_tokens_prose_pane_not_busy
 test_busy_shell_pane_overrides_stale_paused_log
 test_no_run_herdr_unknown_uses_backend_capture
 test_no_run_herdr_idle_agent_status_corroborated_by_busy_pane
