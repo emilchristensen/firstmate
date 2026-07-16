@@ -551,7 +551,9 @@ pane_is_busy() {  # <target> [backend]
     busy) return 0 ;;
   esac
   tail40=$(fm_backend_capture "$backend" "$target" 40 2>/dev/null) || return 1
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+  # last-8 mirrors fm-tmux-lib.sh fm_pane_is_busy (rationale there): the claude
+  # shell-tool spinner sits up to ~7 lines above the composer.
+  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -8 \
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
@@ -585,7 +587,9 @@ stale_window_is_busy() {  # <window> <state>
   case "$bs" in
     busy) return 0 ;;
   esac
-  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -6 \
+  # last-8 mirrors fm-tmux-lib.sh fm_pane_is_busy (rationale there): the claude
+  # shell-tool spinner sits up to ~7 lines above the composer.
+  printf '%s' "$tail40" | grep -v '^[[:space:]]*$' | tail -8 \
     | grep -qiE "${FM_BUSY_REGEX:-$FM_TMUX_BUSY_REGEX_DEFAULT}"
 }
 
