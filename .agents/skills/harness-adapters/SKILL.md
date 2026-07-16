@@ -105,7 +105,7 @@ Natural language is acceptable if uncertain.
 
 | Fact | Value |
 |---|---|
-| Busy-pane signature | `esc to interrupt` |
+| Busy-pane signature | `esc to interrupt` while a turn runs, but NONE while a Bash tool (shell) command runs - the footer shows `Running <N> shell command` and the spinner's live `<N>k tokens` flow readout instead, both matched by the busy regex (docs/tmux-backend.md "Claude busy signatures") |
 | Exit command | `/exit` |
 | Interrupt | single Escape |
 | Skill invocation | `/<skill>` (e.g. `/no-mistakes`) |
