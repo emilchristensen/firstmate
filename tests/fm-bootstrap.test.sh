@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Behavior tests for fm-bootstrap.sh reporting and session-start clone refresh bounds.
 #
-# Bootstrap prints one block or line per problem or capability fact and is silent when all
-# is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
+# Bootstrap prints one block or line per actionable problem, optional verbose
+# BOOTSTRAP_INFO fact, or completed bootstrap no-action fact and is silent when
+# all is well. firstmate consumes the exact 'MISSING: treehouse (install: ...)',
 # 'MISSING: tasks-axi (install: ...)', 'MISSING: quota-axi (install: ...)', and
-# 'TASKS_AXI: available' lines, so those contracts are pinned verbatim. The cases
+# 'BOOTSTRAP_INFO: ...' lines, so those contracts are pinned verbatim. The cases
 # are table-driven over the inputs that vary: whether `treehouse get --help`
 # advertises --lease, which (if any) tasks-axi version is on PATH, whether
 # tasks-axi update advertises --archive-body, whether its mv help advertises
@@ -169,10 +170,10 @@ run_bootstrap_timeout_case() {
     sleep() {
       local inc=${1:-1}
       SECONDS=$((SECONDS + inc))
-      if [ "${FM_FAKE_SLEEP_YIELDS:-0}" -lt 5 ]; then
-        FM_FAKE_SLEEP_YIELDS=$((${FM_FAKE_SLEEP_YIELDS:-0} + 1))
-        command sleep 0.01
-      fi
+      # Advance fake time quickly, but yield on every tick so the background
+      # fleet-sync process can deterministically write its partial output before
+      # the simulated timeout kills it, even on a busy full-suite runner.
+      command sleep 0.01
     }
     # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bootstrap subprocess.
     git() {
@@ -206,6 +207,16 @@ run_bootstrap_timeout_case() {
         FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null
     fi
   )
+}
+
+assert_timeout_report() {
+  local out=$1 expected_timeout=$2 timing timeout elapsed
+  timing=$(printf '%s\n' "$out" | sed -n 's/^FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=\([0-9][0-9]*\)s elapsed=\([0-9][0-9]*\)s)$/\1 \2/p')
+  [ -n "$timing" ] || fail "missing fleet-sync timeout report"
+  timeout=${timing%% *}
+  elapsed=${timing#* }
+  [ "$timeout" -eq "$expected_timeout" ] || fail "expected timeout=${expected_timeout}s, got timeout=${timeout}s"
+  [ "$elapsed" -ge "$timeout" ] || fail "expected elapsed >= timeout, got elapsed=${elapsed}s timeout=${timeout}s"
 }
 
 # Each row (fields are '^'-separated; the install URL contains a literal '|'):
@@ -268,7 +279,7 @@ test_bootstrap_reporting() {
   done <<'ROWS'
 treehouse --lease support is accepted silently^1^0.1.1^1^manual^empty^^
 treehouse without --lease reports an upgrade, gh auth is fine^0^0.1.1^1^-^grep^MISSING: treehouse (install: curl -fsSL https://kunchenguid.github.io/treehouse/install.sh | sh)^NEEDS_GH_AUTH
-compatible tasks-axi is reported available by default^1^0.1.1^1^-^exact^TASKS_AXI: available^
+compatible tasks-axi is silent by default^1^0.1.1^1^-^empty^^
 missing tasks-axi is required by default^1^-^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 incompatible tasks-axi is required by default^1^0.1.0^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
 tasks-axi without archive-body is required by default^1^0.1.2:noarchive^1^-^exact^MISSING: tasks-axi (install: npm install -g tasks-axi)^
@@ -542,7 +553,7 @@ test_treehouse_lease_check_follows_resolved_backend() {
 }
 
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
-  local case_dir home fakebin fake_root out expected
+  local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
   home="$case_dir/home"
   mkdir -p "$home/config"
@@ -554,8 +565,8 @@ test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin")
 
-  expected=$'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote\nFLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=59s elapsed=59s)'
-  assert_contains "$out" "$expected" "bootstrap timeout should scale to 59s for 18 origin-backed projects and relay partial output first"
+  assert_contains "$out" $'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote' "bootstrap timeout should relay partial fleet-sync output first"
+  assert_timeout_report "$out" 59
   pass "bootstrap computes a fleet-size-aware default timeout and preserves partial fleet-sync output"
 }
 
@@ -571,7 +582,7 @@ test_fleet_sync_timeout_floor_preserves_small_fleets() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin")
 
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=20s elapsed=20s)" "small fleets should keep the 20s timeout floor"
+  assert_timeout_report "$out" 20
   pass "bootstrap keeps the quick 20s default for small fleets"
 }
 
@@ -587,7 +598,7 @@ test_fleet_sync_timeout_explicit_override_wins() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" 7)
 
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=7s elapsed=7s)" "explicit timeout override should still win over computed default"
+  assert_timeout_report "$out" 7
   assert_not_contains "$out" "timeout=59s" "explicit override should not be replaced by the computed timeout"
   pass "bootstrap preserves FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT as an explicit override"
 }
@@ -604,7 +615,7 @@ test_fleet_sync_timeout_empty_override_uses_default() {
 
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" "")
 
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=59s elapsed=59s)" "blank timeout env should behave like an unset override"
+  assert_timeout_report "$out" 59
   assert_not_contains "$out" "timeout=20s" "blank timeout env should not force the legacy floor on a large fleet"
   pass "bootstrap treats a blank timeout override as unset"
 }
@@ -624,11 +635,97 @@ test_fleet_sync_timeout_is_computed_before_launch() {
   out=$(run_bootstrap_timeout_case "$home" "$fake_root" "$fakebin" __unset__ "$started_marker" "$git_record" 1)
 
   [ ! -s "$git_record" ] || fail "fleet sync launched before timeout scan finished: $(tr '\n' ';' < "$git_record")"
-  assert_contains "$out" "FLEET_SYNC: fleet: skipped: bootstrap refresh timed out (timeout=20s elapsed=20s)" "launch-order case should still enforce the computed timeout"
+  assert_contains "$out" $'FLEET_SYNC: alpha: synced\nFLEET_SYNC: beta: skipped: no origin remote' "launch-order case should relay partial fleet-sync output before reporting its timeout"
+  assert_timeout_report "$out" 20
   pass "bootstrap computes the timeout before launching fleet sync"
 }
 
-test_crew_dispatch_active_rules_are_surfaced() {
+make_routine_bootstrap_fixture() {
+  local case_dir=$1 fakebin root home sm c1
+  root="$case_dir/root"
+  home="$case_dir/home"
+  sm="$case_dir/sm"
+  fm_git_identity
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' codex > "$home/config/crew-harness"
+  printf '%s\n' '{"rules":[{"when":"normal work","use":{"harness":"codex"}}],"default":{"harness":"claude","effort":"low"}}' \
+    > "$home/config/crew-dispatch.json"
+  git init -q -b main "$root"
+  {
+    printf '%s\n' '.fm-secondmate-home'
+    printf '%s\n' 'config/crew-harness'
+    printf '%s\n' 'config/crew-dispatch.json'
+  } > "$root/.gitignore"
+  printf '%s\n' 'instructions' > "$root/AGENTS.md"
+  mkdir -p "$root/bin" "$root/.agents/skills"
+  printf '%s\n' 'echo ok' > "$root/bin/fm-spawn.sh"
+  printf '%s\n' 'skill' > "$root/.agents/skills/example.md"
+  git -C "$root" add -A
+  git -C "$root" commit -qm initial
+  c1=$(git -C "$root" rev-parse HEAD)
+  git -C "$root" worktree add -q --detach "$sm" "$c1"
+  printf '%s\n' sm > "$sm/.fm-secondmate-home"
+  {
+    printf 'window=firstmate:fm-sm\n'
+    printf 'kind=secondmate\n'
+    printf 'harness=codex\n'
+    printf 'home=%s\n' "$sm"
+  } > "$home/state/sm.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_real_jq "$fakebin"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = display-message ]; then
+  printf '%s\n' codex
+  exit 0
+fi
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  printf '%s|%s|%s\n' "$root" "$home" "$fakebin"
+}
+
+run_routine_bootstrap_fixture() {
+  local shell=$1 case_dir=$2 fixture root home fakebin
+  fixture=$(make_routine_bootstrap_fixture "$case_dir")
+  root=${fixture%%|*}
+  fixture=${fixture#*|}
+  home=${fixture%%|*}
+  fakebin=${fixture#*|}
+  PATH="$fakebin:$BASE_PATH" FM_BACKEND=tmux FM_HOME="$home" FM_ROOT_OVERRIDE="$root" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$shell" "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_routine_bootstrap_confirmations_are_silent() {
+  local out
+  out=$(run_routine_bootstrap_fixture bash "$TMP_ROOT/routine-silent")
+  [ -z "$out" ] || fail "routine bootstrap confirmations should be silent, got: $out"
+  pass "bootstrap keeps routine tasks-axi, harness, dispatch, and already-live liveness confirmations silent"
+}
+
+test_routine_bootstrap_contract_runs_under_system_bash() {
+  local out
+  [ -x /bin/bash ] || { pass "bootstrap routine contract skipped without /bin/bash"; return; }
+  out=$(run_routine_bootstrap_fixture /bin/bash "$TMP_ROOT/routine-bash")
+  [ -z "$out" ] || fail "routine bootstrap contract should be silent under /bin/bash, got: $out"
+  pass "bootstrap routine contract runs under system /bin/bash"
+}
+
+test_bootstrap_info_is_no_load_and_actionable_lines_trigger() {
+  local trigger
+  # shellcheck disable=SC2016 # The backtick-delimited skill names are literal Markdown.
+  trigger=$(sed -n '/- `bootstrap-diagnostics`/,/- `diagnostic-reasoning`/p' "$ROOT/AGENTS.md")
+  assert_contains "$trigger" "actionable diagnostic line" "bootstrap-diagnostics trigger should be action-scoped"
+  assert_contains "$trigger" "BOOTSTRAP_INFO:" "bootstrap-diagnostics trigger should classify BOOTSTRAP_INFO as no-load"
+  assert_not_contains "$trigger" "TASKS_AXI:" "tasks-axi availability must not trigger diagnostics loading"
+  assert_not_contains "$trigger" "CREW_HARNESS_OVERRIDE:" "harness override confirmation must not trigger diagnostics loading"
+  assert_not_contains "$trigger" "CREW_DISPATCH: active" "active dispatch confirmation must not trigger diagnostics loading"
+  assert_not_contains "$trigger" "already-live" "already-live secondmate liveness must not trigger diagnostics loading"
+  pass "bootstrap diagnostics trigger excludes benign lines and keeps actionable prefixes"
+}
+
+test_crew_dispatch_active_rules_are_verbose_bootstrap_info() {
   local case_dir fakebin out expect
   case_dir="$TMP_ROOT/dispatch-active"
   mkdir -p "$case_dir/home/config"
@@ -639,10 +736,14 @@ test_crew_dispatch_active_rules_are_surfaced() {
 
   out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
     FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "active dispatch profile should be silent by default, got: $out"
 
-  expect=$'CREW_DISPATCH: active config/crew-dispatch.json\n  rule: fresh news -> grok\n  rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\n  default: claude/haiku/low'
-  [ "$out" = "$expect" ] || fail "active dispatch profile block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
-  pass "bootstrap surfaces active crew-dispatch rules and default"
+  out=$(PATH="$fakebin:$BASE_PATH" FM_HOME="$case_dir/home" FM_ROOT_OVERRIDE="$case_dir/home" \
+    FM_BOOTSTRAP_VERBOSE_FACTS=1 FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+
+  expect=$'BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json\nBOOTSTRAP_INFO: crew dispatch rule: fresh news -> grok\nBOOTSTRAP_INFO: crew dispatch rule: big feature -> quota-balanced[claude/claude-sonnet-5/high, codex/gpt-5.5/high]\nBOOTSTRAP_INFO: crew dispatch default: claude/haiku/low'
+  [ "$out" = "$expect" ] || fail "active dispatch verbose info block mismatch"$'\n'"expected: $expect"$'\n'"actual:   $out"
+  pass "bootstrap surfaces active crew-dispatch rules only as verbose BOOTSTRAP_INFO"
 }
 
 test_crew_dispatch_validation() {
@@ -672,9 +773,11 @@ malformed dispatch config is flagged^{"rules":[^exact^CREW_DISPATCH: invalid con
 unverified dispatch harness is flagged^{"rules":[{"when":"anything","use":{"harness":"spaceship"}}],"default":{"harness":"codex"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unverified harness: spaceship
 unsupported codex max effort is flagged^{"rules":[{"when":"big feature","use":{"harness":"codex","model":"gpt-5","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 unsupported grok max effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"max"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:max
+unsupported grok xhigh effort is flagged^{"rules":[{"when":"deep current work","use":{"harness":"grok","model":"grok-4","effort":"xhigh"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: grok:xhigh
+pi max effort is accepted^{"rules":[{"when":"deep coding","use":{"harness":"pi","model":"openai-codex/gpt-5.6-sol","effort":"max"}}]}^empty^
 unsupported opencode effort is flagged^{"rules":[{"when":"opencode work","use":{"harness":"opencode","model":"anthropic/claude-sonnet-4-5","effort":"high"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: opencode:high
-array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
-array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
+array use with quota-balanced is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude","model":"claude-sonnet-5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}],"select":"quota-balanced"}]}^empty^
+array use without select is accepted^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}]}]}^empty^
 empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each rule needs at least one use profile
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
@@ -699,5 +802,8 @@ test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
 test_fleet_sync_timeout_empty_override_uses_default
 test_fleet_sync_timeout_is_computed_before_launch
-test_crew_dispatch_active_rules_are_surfaced
+test_routine_bootstrap_confirmations_are_silent
+test_routine_bootstrap_contract_runs_under_system_bash
+test_bootstrap_info_is_no_load_and_actionable_lines_trigger
+test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
