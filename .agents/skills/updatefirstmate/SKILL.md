@@ -1,6 +1,6 @@
 ---
 name: updatefirstmate
-description: Self-update a running firstmate and its secondmates to the latest from origin. Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate"). Fast-forwards this firstmate repo's default branch and every secondmate home from origin (fast-forward only, never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions.
+description: Self-update a running firstmate and its secondmates to the latest from origin. Use when the captain invokes /updatefirstmate (e.g. "/updatefirstmate", "update firstmate", "pull the latest firstmate"). Fast-forwards this firstmate repo's default branch and every secondmate home from origin (fast-forward only, never forced, never disruptive), then re-reads AGENTS.md and nudges each updated secondmate to do the same, so the whole tree runs the latest bin/ and instructions. Also detects when the fork is behind its upstream repo and opens a reviewable upstream merge PR (never a blind merge into main).
 user-invocable: true
 metadata:
   internal: true
@@ -25,9 +25,10 @@ This touches only the firstmate repo and its own worktrees, never anything under
    bin/fm-update.sh
    ```
    It fast-forwards this firstmate repo's default branch from origin, then fast-forwards every registered secondmate home (each a treehouse worktree of this same repo, leased at a detached HEAD on the default branch) the same way.
-   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by two action lines that tell you exactly what to do next:
+   It prints one status line per target (`updated <old>..<new>` / `already current` / `skipped: <reason>`), followed by three action lines that tell you exactly what to do next:
    - `reread-firstmate: yes|no`
    - `nudge-secondmates: fm-<id>...|none`
+   - `upstream-merge: none | current | needed (<N> behind, <M> ahead) | skipped: <reason>`
 
 2. **Re-read AGENTS.md if your own instructions changed.**
    When the updater printed `reread-firstmate: yes`, the tracked instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) just advanced under you.
@@ -43,7 +44,28 @@ This touches only the firstmate repo and its own worktrees, never anything under
    This is a gentle steer, not an interruption: the secondmate already got a safe tracked-files fast-forward, and the nudge never forces, tears down, or discards its work.
    A secondmate that was skipped, already current, or has no live metadata is not on the list and needs no nudge.
 
-4. **Report to the captain in plain outcomes.**
+4. **Open an upstream merge PR when the fork is behind upstream.**
+   Act on the `upstream-merge:` line:
+   - `none` or `current` - nothing to do; the fork has no upstream remote or is already in sync with it.
+   - `skipped: <reason>` - surface to the captain only when the reason needs attention (a dirty tree or an upstream fetch failure means the check could not run and should be looked at); an off-default-branch skip during other in-flight firstmate work is expected and needs no report.
+   - `needed (<N> behind, <M> ahead)` - the fork is behind upstream and an upstream merge PR should be opened, but firstmate does NOT perform the merge in its primary checkout: the merge produces shared tracked changes that must ship through no-mistakes and a captain-approved PR.
+     Do this in two steps:
+     1. **Check for an already-open upstream merge PR first**, so a run does not open a duplicate every time the fork is behind.
+        List open PRs whose head branch matches the upstream-merge convention:
+        ```sh
+        gh-axi pr list --state open
+        ```
+        If any open PR has a head branch matching `fm/merge-upstream-*`, report that existing PR's full URL to the captain and do NOT open another.
+     2. **Otherwise dispatch a crewmate** (firstmate-repo, no-mistakes ship) to prepare the merge on a branch and open the PR.
+        The brief must instruct the crewmate to:
+        - create branch `fm/merge-upstream-<YYYY-MM-DD>` from the up-to-date `main`;
+        - `git fetch upstream` and `git merge upstream/<default-branch>`;
+        - resolve conflicts using firstmate's fork-merge convention - superset-wins: keep the union of both sides' intent, and take upstream wholesale for files the fork never customized;
+        - load `firstmate-coding-guidelines` (this touches firstmate's own shared tracked material);
+        - run no-mistakes and open the PR.
+     The captain owns the actual merge; firstmate never merges the upstream PR without the captain's explicit word (prime directive #2).
+
+5. **Report to the captain in plain outcomes.**
    Summarize what landed under `AGENTS.md` section 9 without firstmate's internal vocabulary: which parts of the fleet are now on the latest, and which were left as-is and why.
    For example: "Captain, firstmate and both domain supervisors are now on the latest."
    Surface any skipped target whose reason needs the captain's attention - for instance a home with its own un-landed changes (diverged) or local edits (dirty), which were left untouched on purpose.
@@ -58,3 +80,8 @@ This touches only the firstmate repo and its own worktrees, never anything under
 - **Secondmates are never disrupted.**
   A secondmate gets a tracked-files fast-forward (safe while it is mid-task, since its work lives in gitignored operational dirs and separate project worktrees) plus a gentle re-read nudge.
   It is never torn down, interrupted, or forced.
+- **Upstream merges land only through a reviewed PR, never a direct write to `main`.**
+  Unlike the origin path, the fork is diverged from upstream, so pulling upstream is a real 3-way merge with likely conflicts on shared files (`AGENTS.md` and the like) - not a fast-forward.
+  `bin/fm-update.sh` only DETECTS the divergence and reports it; it never branches, merges, resolves conflicts, or pushes for upstream.
+  The merge and conflict resolution happen on a `fm/merge-upstream-<date>` branch in a dispatched crewmate's isolated worktree, ship through no-mistakes, and reach `main` only via a captain-approved PR.
+  The captain owns the merge (prime directive #2), and nothing ever writes upstream commits straight into `main`.
