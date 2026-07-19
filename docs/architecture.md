@@ -232,6 +232,7 @@ The refresh also prunes local branches whose remote is gone and that no worktree
 
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
 The update is fast-forward only: dirty, diverged, offline, and off-default targets are reported and left untouched.
+After the origin fast-forward, the updater also detects (never merges) whether the fork's main repo is behind its `upstream` remote; a needed upstream merge is prepared on a `fm/merge-upstream-<date>` branch in a dispatched crewmate's isolated worktree, ships through no-mistakes, and reaches `main` only via a captain-approved PR.
 The origin-based updater and the local secondmate sync share the same guarded fast-forward helper; only the origin mode fetches.
 The mechanics are owned by the `/updatefirstmate` skill and firstmate's operating manual in [`AGENTS.md`](../AGENTS.md) (self-update).
 

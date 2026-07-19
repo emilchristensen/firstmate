@@ -17,6 +17,10 @@
 #   - Secondmate homes resolve from both state/<id>.meta and the
 #     data/secondmates.md registry, deduped, and the firstmate repo is never
 #     re-processed as one of its own secondmates.
+#   - Upstream-divergence DETECTION for FM_ROOT only: the caller-action line
+#     upstream-merge: none|current|needed (<N> behind, <M> ahead)|skipped: <reason>
+#     is correct in every case, and the detection itself never branches, merges,
+#     or pushes (it is DETECTION only; the merge ships through a reviewed PR).
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -90,6 +94,30 @@ bump_origin() {
 run_update() {
   local w=$1
   FM_ROOT_OVERRIDE="$w/main" FM_HOME="$w/home" "$UPDATE" 2>/dev/null
+}
+
+# Add an `upstream` remote to the firstmate repo: a second bare repo seeded from
+# the fork's current main tip, so the two share history and a real behind/ahead
+# can be produced. A scratch `upseed` clone drives upstream-side commits. Args: world.
+add_upstream() {
+  local w=$1
+  git init -q --bare "$w/upstream.git"
+  git -C "$w/upstream.git" symbolic-ref HEAD refs/heads/main
+  git -C "$w/main" push -q "$w/upstream.git" main
+  git -C "$w/main" remote add upstream "$w/upstream.git"
+  git clone -q "$w/upstream.git" "$w/upseed"
+}
+
+# Advance upstream/main by N commits (default 1). Args: world [n].
+bump_upstream() {
+  local w=$1 n=${2:-1} i
+  git -C "$w/upseed" pull -q origin main >/dev/null 2>&1 || true
+  for i in $(seq 1 "$n"); do
+    printf 'up-%s\n' "$i" >> "$w/upseed/UPSTREAM.md"
+    git -C "$w/upseed" add -A
+    git -C "$w/upseed" commit -qm "upstream-$i"
+  done
+  git -C "$w/upseed" push -q origin main
 }
 
 # --- T1: main + secondmate behind, instruction change; FF, not a merge ------
@@ -291,6 +319,91 @@ test_unsafe_secondmate_home_skipped_before_git_update() {
   pass "T11 unsafe secondmate home is not fast-forwarded"
 }
 
+# --- U1: no upstream remote -> verdict none, nothing else touched ----------
+test_upstream_none_when_no_remote() {
+  local w out
+  w=$(new_world u1)
+  bump_origin "$w" instr
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "upstream-merge: none" "no upstream remote reports none"
+  # The origin path still worked normally; the upstream check changed nothing.
+  assert_contains "$out" "firstmate: updated " "origin fast-forward unaffected"
+  git -C "$w/main" remote get-url upstream >/dev/null 2>&1 \
+    && fail "upstream remote unexpectedly present"
+  pass "U1 upstream-less home reports none and is otherwise unchanged"
+}
+
+# --- U2: upstream has nothing new -> current -------------------------------
+test_upstream_current_when_no_new_commits() {
+  local w out
+  w=$(new_world u2)
+  add_upstream "$w"   # upstream seeded from the fork tip, no extra commits
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "upstream-merge: current" "upstream with no new commits reports current"
+  pass "U2 upstream in sync reports current"
+}
+
+# --- U3: upstream ahead -> needed with the correct behind-count ------------
+# Origin is NOT bumped, so the origin fast-forward is a no-op and the fork main
+# tip stays put; this isolates the upstream check and lets us assert it never
+# branches, merges, or pushes.
+test_upstream_needed_reports_counts_without_mutating() {
+  local w out before up_before
+  w=$(new_world u3)
+  add_upstream "$w"
+  bump_upstream "$w" 2
+  before=$(git -C "$w/main" rev-parse HEAD)
+  up_before=$(git -C "$w/upstream.git" rev-parse main)
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "upstream-merge: needed (2 behind, 0 ahead)" "upstream ahead reports needed with behind-count"
+  # Detection only: no branch, no merge commit, no push.
+  [ "$(git -C "$w/main" rev-parse HEAD)" = "$before" ] \
+    || fail "upstream detection moved the fork HEAD"
+  [ "$(git -C "$w/main" for-each-ref --format='%(refname)' 'refs/heads/fm/merge-upstream-*' | wc -l | tr -d ' ')" -eq 0 ] \
+    || fail "upstream detection created a merge branch"
+  [ "$(git -C "$w/main" rev-list --count --all --merges)" -eq 0 ] \
+    || fail "upstream detection created a merge commit"
+  [ "$(git -C "$w/upstream.git" rev-parse main)" = "$up_before" ] \
+    || fail "upstream detection pushed to the upstream remote"
+  pass "U3 upstream ahead reports needed with correct counts and mutates nothing"
+}
+
+# --- U4: dirty tree -> skipped, upstream not fetched into a merge -----------
+test_upstream_skipped_when_dirty() {
+  local w out
+  w=$(new_world u4)
+  add_upstream "$w"
+  bump_upstream "$w" 1
+  printf 'local edit\n' >> "$w/main/AGENTS.md"
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "upstream-merge: skipped: dirty working tree" "dirty tree skips upstream detection"
+  grep -q 'local edit' "$w/main/AGENTS.md" || fail "dirty edit was discarded"
+  pass "U4 dirty tree skips upstream detection"
+}
+
+# --- U5: firstmate off its default branch -> skipped -----------------------
+test_upstream_skipped_when_off_default_branch() {
+  local w out
+  w=$(new_world u5)
+  add_upstream "$w"
+  bump_upstream "$w" 1
+  git -C "$w/main" checkout -q -b feature/wip
+
+  out=$(run_update "$w")
+
+  assert_contains "$out" "upstream-merge: skipped: firstmate not on its default branch" \
+    "off-default firstmate skips upstream detection"
+  pass "U5 off-default firstmate skips upstream detection"
+}
+
 test_updates_main_and_secondmate
 test_reread_gate_is_instruction_only
 test_dirty_secondmate_skipped
@@ -300,5 +413,10 @@ test_registry_backstop_dedup_and_self_exclusion
 test_firstmate_wrong_branch_skipped
 test_firstmate_detached_head_skipped
 test_unsafe_secondmate_home_skipped_before_git_update
+test_upstream_none_when_no_remote
+test_upstream_current_when_no_new_commits
+test_upstream_needed_reports_counts_without_mutating
+test_upstream_skipped_when_dirty
+test_upstream_skipped_when_off_default_branch
 
 echo "# all fm-update tests passed"
